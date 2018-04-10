@@ -109,8 +109,11 @@ int XPassAgent::delay_bind_dispatch(const char *varName, const char *localName,
 
 void XPassAgent::init() {
   w_ = w_init_;
-//  cur_credit_rate_ = (int)(alpha_ * max_credit_rate_);
+  //cur_credit_rate_ = 64734895/4;//(int)(alpha_ * max_credit_rate_);//64734895/4;
   last_credit_rate_update_ = now();
+  last_max_credit_rate_ = 64734895/2;//max_credit_rate_ / 2;//64734895/2;
+  //ssthresh = max_credit_rate_ / 6;
+  //printf("variable - max_credit_rate_: %d, cur: %d\n", max_credit_rate_, cur_credit_rate_);
 }
 
 int XPassAgent::command(int argc, const char*const* argv) {
@@ -171,7 +174,7 @@ void XPassAgent::recv_credit_request(Packet *pkt) {
         lalpha = alpha_;
       } else {
         lalpha = alpha_ * xph->sendbuffer_ / 40.0;
-      } 
+      }
       cur_credit_rate_ = (int)(lalpha * max_credit_rate_);
       fst_ = xph->credit_sent_time();
       // need to start to send credits.
@@ -197,7 +200,7 @@ void XPassAgent::recv_credit(Packet *pkt) {
       if (datalen_remaining() > 0) {
         send(construct_data(pkt), 0);
       }
- 
+
       if (datalen_remaining() == 0) {
         if (credit_stop_timer_.status() != TIMER_IDLE) {
           fprintf(stderr, "Error: CreditStopTimer seems to be scheduled more than once.\n");
@@ -468,7 +471,7 @@ void XPassAgent::send_credit() {
   double avg_credit_size = (min_credit_size_ + max_credit_size_)/2.0;
   double delay;
 
-  credit_feedback_control();
+  credit_feedback_control_CUBIC();
 
   // send credit.
   send(construct_credit(), 0);
@@ -604,4 +607,120 @@ void XPassAgent::credit_feedback_control() {
   credit_total_ = 0;
   credit_dropped_ = 0;
   last_credit_rate_update_ = now();
+}
+
+void XPassAgent::credit_feedback_control_CUBIC() {
+  if (rtt_ <= 0.0) {
+    return;
+  }
+  if ((now() - last_credit_rate_update_) < rtt_) {
+    return;
+  }
+  if (credit_total_ == 0) {
+    return;
+  }
+
+  int old_rate = cur_credit_rate_;
+  double loss_rate = credit_dropped_/(double)credit_total_;
+  double target_loss = (1.0 - cur_credit_rate_/(double)max_credit_rate_) * target_loss_scaling_ * 0.3;
+  int min_rate = (int)(avg_credit_size() / rtt_);
+
+  //////CUBIC///////
+  double t;
+  double s_min = 100000;
+  double s_max = 5000000;
+  //printf(">> Time constant - rtt:%f, epoch:%f, K:%f, C:%f <<\n", rtt_, epoch_start, K, C);
+  //printf("   Each step - loss:%f%, cur_rate:%d, prev_rate:%d, last_max:%d, origin:%d\n", loss_rate*100, cur_credit_rate_, prev_credit_rate_, last_max_credit_rate_, origin_point); 
+  if (loss_rate > target_loss) {
+    //printf("loss occurs, loss rate: %f%, target:%f%, cur_rate:%d\n", loss_rate*100, target_loss*100, cur_credit_rate_);
+    // congestion has been detected!
+    if (loss_rate >= 1.0) {
+      prev_credit_rate_ = cur_credit_rate_;
+      cur_credit_rate_ = (int)(avg_credit_size() / rtt_);
+    } else {
+      last_max_credit_rate_ = prev_credit_rate_;
+      /*cur_credit_rate_ = (int)(avg_credit_size()*(credit_total_ - credit_dropped_)
+                         / (now() - last_credit_rate_update_)
+                         * (1.0+target_loss));
+      */      
+      //prev_credit_rate_ = cur_credit_rate_;
+      if (prev_credit_rate_ != 0) {
+        cur_credit_rate_ = 0.5 * prev_credit_rate_;
+      } else {
+        cur_credit_rate_ = 0.5 * cur_credit_rate_;
+      }
+      prev_credit_rate_ = last_max_credit_rate_;
+    }
+    if (cur_credit_rate_ > old_rate) {
+      cur_credit_rate_ = old_rate;
+    }
+    last_max_credit_rate_ = cur_credit_rate_;
+
+    //printf("   !!! loss occurs\n");
+
+    //w_ = max(w_/2.0, min_w_);
+    epoch_start = 0;
+  } else {
+    // there is no congestion. 
+    //if (cur_credit_rate_ < ssthresh) {
+    //  cur_credit_rate_ *= 2;
+    //} else {
+      //CUBIC
+      prev_credit_rate_ = cur_credit_rate_;
+      if (epoch_start == 0) {
+        epoch_start = now();
+        if (cur_credit_rate_ < last_max_credit_rate_) {
+          //C = 64734895/125;
+          //K = cbrt((last_max_credit_rate_ - cur_credit_rate_)/C); //the time to increase to last max credit rate in unit of rtt
+          K=5;
+          C = (last_max_credit_rate_ - cur_credit_rate_) / (K * K * K);
+          origin_point = last_max_credit_rate_;
+        } else {
+          K = 0;
+          C = last_max_credit_rate_ * 0.5 / 10;
+          origin_point = cur_credit_rate_;
+        }
+      }
+      t = (now() - epoch_start)/rtt_ + 2;
+      cur_credit_rate_ = calculate_cubic_rate((t-K)*(t-K)*(t-K), s_min, s_max);
+      //printf(" loss not occurs. t:%f, K:%f, C:%f\n", t, K, C);
+      /*
+      if ((t-K)*(t-K)*(t-K) > 0x7fffffff/C + 1){ //prevent to exceed range of int
+        cur_credit_rate_ = max_credit_rate_;
+      } else {
+        cur_credit_rate_ = origin_point + int(C * (t - K) * (t - K) * (t - K));
+      }
+      printf("   loss not occurs. t:%f, origin:%d, cur:%d, old:%d, C:%f, K: %f\n", t, origin_point, cur_credit_rate_, old_rate, C, K);
+      if (cur_credit_rate_ - old_rate < s_min) {
+          cur_credit_rate_ = old_rate + s_min;
+      }*/
+    //}
+  }
+
+  if (cur_credit_rate_ > max_credit_rate_) {
+    cur_credit_rate_ = max_credit_rate_;
+  }
+  if (cur_credit_rate_ < min_rate) {
+    cur_credit_rate_ = min_rate;
+  }
+
+  //printf("   new_credit_rate:%d\n\n", cur_credit_rate_);
+
+  credit_total_ = 0;
+  credit_dropped_ = 0;
+  last_credit_rate_update_ = now();
+}
+
+int XPassAgent::calculate_cubic_rate(double cubic_time, double s_min, double s_max) {
+  if ((C!=0)&&(cubic_time > (0x7fffffff - origin_point)/C + 1)) { //prevent to exceed the maximum of int
+    return max_credit_rate_;
+  }
+  int new_rate_ = origin_point + int(C * cubic_time);
+  if (new_rate_ < cur_credit_rate_ + s_min) {
+    new_rate_ = cur_credit_rate_ + s_min;
+  }
+  else if (new_rate_ > cur_credit_rate_ + s_max) {
+    new_rate_ = cur_credit_rate_ + s_max;
+  }
+  return new_rate_;
 }
