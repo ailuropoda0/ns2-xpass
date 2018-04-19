@@ -87,7 +87,7 @@ public:
   XPassAgent(): Agent(PT_XPASS_DATA), credit_send_state_(XPASS_SEND_CLOSED),
                 credit_recv_state_(XPASS_RECV_CLOSED), last_credit_rate_update_(-0.0),
                 credit_total_(0), credit_dropped_(0), can_increase_w_(false),
-                epoch_start(0), origin_point(0), prev_credit_rate_(0), K(0), 
+                epoch_start(0), origin_point(0), K(0), 
                 send_credit_timer_(this), credit_stop_timer_(this), 
                 sender_retransmit_timer_(this), receiver_retransmit_timer_(this),
                 curseq_(1), t_seqno_(1), recv_next_(1),
@@ -156,13 +156,12 @@ protected:
 
   //CUBIC
   int last_max_credit_rate_;
-  int prev_credit_rate_;
-  //slow start threshold
-  //int ssthresh;
   int origin_point;
   double epoch_start;
   double K;
   double C;
+  double s_max;
+  double s_min;
 
   SendCreditTimer send_credit_timer_;
   CreditStopTimer credit_stop_timer_;
@@ -230,8 +229,7 @@ protected:
   void update_rtt(Packet *pkt);
 
   void credit_feedback_control();
-  void credit_feedback_control_CUBIC();
-  int calculate_cubic_rate(double cubic_time, double s_min, double s_max);
+  int calculate_bounded_cubic_rate(double time);
 };
 
 #endif
