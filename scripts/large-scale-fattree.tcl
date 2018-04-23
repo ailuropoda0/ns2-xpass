@@ -1,4 +1,5 @@
 set ns [new Simulator]
+
 #
 # Flow configurations
 #
@@ -53,9 +54,9 @@ set simEndTime 60
 
 # Output file
 file mkdir "outputs"
-set nt [open outputs/trace.out w]
-set fct_out [open outputs/fct.out w]
-set wst_out [open outputs/waste.out w]
+set nt [open "outputs/trace.out" w]
+set fct_out [open "outputs/fct.out" w]
+set wst_out [open "outputs/waste.out" w]
 puts $fct_out "Flow ID,Flow Size (bytes),Flow Completion Time (secs)"
 puts $wst_out "Flow ID,Flow Size (bytes),Wasted Credit"
 close $fct_out

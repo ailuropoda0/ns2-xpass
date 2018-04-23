@@ -33,6 +33,10 @@ void ReceiverRetransmitTimer::expire(Event *) {
   a_->handle_receiver_retransmit();
 }
 
+void FCTTimer::expire(Event *) {
+  a_->handle_fct();
+}
+
 void XPassAgent::delay_bind_init_all() {
   delay_bind_init_one("max_credit_rate_");
   delay_bind_init_one("alpha_");
@@ -170,6 +174,8 @@ void XPassAgent::recv_credit_request(Packet *pkt) {
   hdr_xpass *xph = hdr_xpass::access(pkt);
 
   switch (credit_send_state_) {
+    case XPASS_SEND_CLOSE_WAIT:
+      fct_timer_.force_cancel();
     case XPASS_SEND_CLOSED:
       double lalpha;
       init();
@@ -213,7 +219,7 @@ void XPassAgent::recv_credit(Packet *pkt) {
         // credit_stop_timer_ schedules CREDIT_STOP packet with no delay.
         credit_stop_timer_.sched(0);
       } else if (now() - last_credit_recv_update_ >= rtt_) {
-        if (credit_recved_rtt_ >= pkt_remaining()) {
+        if (credit_recved_rtt_ >= (1 * pkt_remaining())) {
           // Early credit stop
           if (credit_stop_timer_.status() != TIMER_IDLE) {
             fprintf(stderr, "Error: CreditStopTimer seems to be scheduled more than once.\n");
@@ -281,10 +287,16 @@ void XPassAgent::recv_nack(Packet *pkt) {
 }
 
 void XPassAgent::recv_credit_stop(Packet *pkt) {
+  fct_ = now() - fst_;
+  fct_timer_.sched(default_credit_stop_timeout_);
+  send_credit_timer_.force_cancel();
+  credit_send_state_ = XPASS_SEND_CLOSE_WAIT;
+}
+
+void XPassAgent::handle_fct() {
   FILE *fct_out = fopen("outputs/fct.out","a");
 
-  send_credit_timer_.force_cancel();
-  fprintf(fct_out,"%d,%ld,%.10lf\n", fid_, recv_next_-1, now()-fst_);
+  fprintf(fct_out, "%d,%ld,%.10lf\n", fid_, recv_next_-1, fct_);
   fclose(fct_out);
   credit_send_state_ = XPASS_SEND_CLOSED;
 }
