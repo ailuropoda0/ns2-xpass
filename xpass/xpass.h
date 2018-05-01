@@ -8,6 +8,15 @@
 #include <assert.h>
 #include <math.h>
 
+// Define one of XPASS_CFC_ORIGINAL, XPASS_CFC_BIC, XPASS_CFC_CUBIC
+#define XPASS_CFC_CUBIC
+
+#if !defined(XPASS_CFC_ORIGINAL) && !defined(XPASS_CFC_BIC) && !defined(XPASS_CFC_CUBIC)
+#error Xpass credit feedback control method (XPASS_CFC_X) must be designtated
+#endif
+
+#define CREDIT_BURST_SIZE 1 
+
 typedef enum XPASS_SEND_STATE_ {
   XPASS_SEND_CLOSED,
   XPASS_SEND_CLOSE_WAIT,
@@ -97,11 +106,15 @@ public:
   XPassAgent(): Agent(PT_XPASS_DATA), credit_send_state_(XPASS_SEND_CLOSED),
                 credit_recv_state_(XPASS_RECV_CLOSED), last_credit_rate_update_(-0.0),
                 credit_total_(0), credit_dropped_(0), can_increase_w_(false),
-                epoch_start(0), origin_point(0), K(0), 
                 send_credit_timer_(this), credit_stop_timer_(this), 
                 sender_retransmit_timer_(this), receiver_retransmit_timer_(this),
                 fct_timer_(this), curseq_(1), t_seqno_(1), recv_next_(1),
                 c_seqno_(1), c_recv_next_(1), rtt_(-0.0),
+                initial_credit_rate_(0.0),
+                credit_cnt_(0),
+#ifdef XPASS_CFC_CUBIC                
+                cubic_epoch_start(0), cubic_origin_point(0), cubic_K(0), 
+#endif
                 credit_recved_(0), wait_retransmission_(false),
                 credit_wasted_(0), credit_recved_rtt_(0), last_credit_recv_update_(0) { }
   virtual int command(int argc, const char*const* argv);
@@ -119,6 +132,9 @@ protected:
   int min_ethernet_size_;
   // maximum Ethernet frame size (= maximum data packet size)
   int max_ethernet_size_;
+
+  // Experiment ID
+  int exp_id_;
 
   // If min_credit_size_ and max_credit_size_ are the same, 
   // credit size is determined statically. Otherwise, if
@@ -164,15 +180,6 @@ protected:
   // minimum jitter: -1.0 ~ 1.0 (wrt. inter-credit gap)
   double min_jitter_;
 
-  //CUBIC
-  int last_max_credit_rate_;
-  int origin_point;
-  double epoch_start;
-  double K;
-  double C;
-  double s_max;
-  double s_min;
-
   SendCreditTimer send_credit_timer_;
   CreditStopTimer credit_stop_timer_;
   SenderRetransmitTimer sender_retransmit_timer_;
@@ -213,6 +220,32 @@ protected:
   // temp variables
   int credit_wasted_;
 
+  // whether to apply early credit stop
+  int early_credit_stop_;
+
+  // whether to apply early credit stop
+  int dynamic_target_loss_;
+
+  // whether to apply dynamic target loss on credit feedback control
+  int adaptive_initial_rate_;
+
+  // predefined initial credit rate
+  int initial_credit_rate_;
+
+  // credit counter
+  int credit_cnt_;
+
+#ifdef XPASS_CFC_CUBIC
+  int cubic_last_max_credit_rate_;
+  int cubic_origin_point;
+  double cubic_epoch_start;
+  double cubic_K;
+  double cubic_C;
+  double cubic_s_max;
+  double cubic_s_min;
+  int calculate_bounded_cubic_rate(double time);
+#endif
+
   inline double now() { return Scheduler::instance().clock(); }
   seq_t datalen_remaining() { return (curseq_ - t_seqno_); }
   int max_segment() { return (max_ethernet_size_ - xpass_hdr_size_); }
@@ -242,7 +275,6 @@ protected:
   void update_rtt(Packet *pkt);
 
   void credit_feedback_control();
-  int calculate_bounded_cubic_rate(double time);
 };
 
 #endif

@@ -52,6 +52,7 @@ void XPassAgent::delay_bind_init_all() {
   delay_bind_init_one("default_credit_stop_timeout_");
   delay_bind_init_one("min_jitter_");
   delay_bind_init_one("max_jitter_");
+  delay_bind_init_one("exp_id_");
   Agent::delay_bind_init_all();
 }
 
@@ -108,6 +109,9 @@ int XPassAgent::delay_bind_dispatch(const char *varName, const char *localName,
   if (delay_bind(varName, localName, "min_jitter_", &min_jitter_, tracer)) {
     return TCL_OK;
   }
+  if (delay_bind(varName, localName, "exp_id_", &exp_id_, tracer)) {
+    return TCL_OK;
+  }
   return Agent::delay_bind_dispatch(varName, localName, tracer);
 }
 
@@ -116,10 +120,10 @@ void XPassAgent::init() {
   cur_credit_rate_ = (int)(alpha_ * max_credit_rate_);
   //cur_credit_rate_ = 64734895/4;//(int)(alpha_ * max_credit_rate_);//64734895/4;
   last_credit_rate_update_ = now();
-  last_max_credit_rate_ = 64734895/2;//max_credit_rate_ / 2;//64734895/2;
-  C = 64734895/128;
-  s_max = 60000000;
-  s_min = 100000;
+  cubic_last_max_credit_rate_ = 64734895/2;//max_credit_rate_ / 2;//64734895/2;
+  cubic_C = 64734895/128;
+  cubic_s_max = 60000000;
+  cubic_s_min = 100000;
   //printf("variable - max_credit_rate_: %d, cur: %d\n", max_credit_rate_, cur_credit_rate_);
 }
 
@@ -294,7 +298,10 @@ void XPassAgent::recv_credit_stop(Packet *pkt) {
 }
 
 void XPassAgent::handle_fct() {
-  FILE *fct_out = fopen("outputs/fct.out","a");
+  char foname[40];
+  sprintf(foname, "outputs/fct_%d.out", exp_id_);
+
+  FILE *fct_out = fopen(foname,"a");
 
   fprintf(fct_out, "%d,%ld,%.10lf\n", fid_, recv_next_-1, fct_);
   fclose(fct_out);
@@ -320,7 +327,10 @@ void XPassAgent::handle_sender_retransmit() {
       break;
     case XPASS_RECV_CLOSE_WAIT:
       if (credit_recved_ == 0) {
-        FILE *waste_out = fopen("outputs/waste.out","a");
+        char foname[40];
+        sprintf(foname, "outputs/waste_%d.out", exp_id_);
+
+        FILE *waste_out = fopen(foname,"a");
 
         credit_recv_state_ = XPASS_RECV_CLOSED;
         sender_retransmit_timer_.force_cancel();
@@ -490,9 +500,16 @@ void XPassAgent::send_credit() {
 
   // send credit.
   send(construct_credit(), 0);
+  credit_cnt_++;
+
+  if(credit_cnt_ % CREDIT_BURST_SIZE != 0) {
+    // resend credit without delay
+    send_credit_timer_.resched(0);
+    return;
+  }
 
   // calculate delay for next credit transmission.
-  delay = avg_credit_size / cur_credit_rate_;
+  delay = avg_credit_size / cur_credit_rate_ * CREDIT_BURST_SIZE;
   // add jitter
   if (max_jitter_ > min_jitter_) {
     double jitter = (double)rand()/(double)RAND_MAX;
@@ -569,7 +586,8 @@ void XPassAgent::update_rtt(Packet *pkt) {
   }
 }
 
-/*void XPassAgent::credit_feedback_control() {
+#ifdef XPASS_CFC_ORIGINAL
+void XPassAgent::credit_feedback_control() {
   if (rtt_ <= 0.0) {
     return;
   }
@@ -622,8 +640,10 @@ void XPassAgent::update_rtt(Packet *pkt) {
   credit_total_ = 0;
   credit_dropped_ = 0;
   last_credit_rate_update_ = now();
-}*/
+}
+#endif
 
+#ifdef XPASS_CFC_CUBIC
 void XPassAgent::credit_feedback_control() {
   if (rtt_ <= 0.0) {
     return;
@@ -654,29 +674,29 @@ void XPassAgent::credit_feedback_control() {
     if (cur_credit_rate_ > old_rate) {
       cur_credit_rate_ = old_rate;
     }
-    last_max_credit_rate_ = old_rate;
+    cubic_last_max_credit_rate_ = old_rate;
 
-    epoch_start = 0.0;
+    cubic_epoch_start = 0.0;
   } else {
     // there is no congestion. 
-    if (epoch_start == 0.0) {
-      epoch_start = now();
-      if (cur_credit_rate_ < last_max_credit_rate_) {
-        K = cbrt((last_max_credit_rate_ - cur_credit_rate_)/C); //the time to increase to the last max credit rate in unit of rtt
-        origin_point = last_max_credit_rate_;
+    if (cubic_epoch_start == 0.0) {
+      cubic_epoch_start = now();
+      if (cur_credit_rate_ < cubic_last_max_credit_rate_) {
+        cubic_K = cbrt((cubic_last_max_credit_rate_ - cur_credit_rate_)/cubic_C); //the time to increase to the last max credit rate in unit of rtt
+        cubic_origin_point = cubic_last_max_credit_rate_;
       } else {
-        K = 0;
-        origin_point = cur_credit_rate_;
+        cubic_K = 0;
+        cubic_origin_point = cur_credit_rate_;
       }
     }
-    t = (now() - epoch_start)/rtt_ + 2;
-    cur_credit_rate_ = calculate_bounded_cubic_rate((t-K));
+    t = (now() - cubic_epoch_start)/rtt_ + 2;
+    cur_credit_rate_ = calculate_bounded_cubic_rate((t-cubic_K));
   }
 
   if (cur_credit_rate_ > max_credit_rate_) {
     cur_credit_rate_ = max_credit_rate_;
-    last_max_credit_rate_ = max_credit_rate_;
-    epoch_start = 0.0;
+    cubic_last_max_credit_rate_ = max_credit_rate_;
+    cubic_epoch_start = 0.0;
   }
   if (cur_credit_rate_ < min_rate) {
     cur_credit_rate_ = min_rate;
@@ -688,12 +708,13 @@ void XPassAgent::credit_feedback_control() {
 }
 
 int XPassAgent::calculate_bounded_cubic_rate(double time) {
-  int new_rate_ = origin_point + int(C * time * time * time);
-  if (new_rate_ < cur_credit_rate_ + s_min) {
-    new_rate_ = cur_credit_rate_ + s_min;
+  int new_rate_ = cubic_origin_point + int(cubic_C * time * time * time);
+  if (new_rate_ < cur_credit_rate_ + cubic_s_min) {
+    new_rate_ = cur_credit_rate_ + cubic_s_min;
   }
-  else if (new_rate_ > cur_credit_rate_ + s_max) {
-    new_rate_ = cur_credit_rate_ + s_max;
+  else if (new_rate_ > cur_credit_rate_ + cubic_s_max) {
+    new_rate_ = cur_credit_rate_ + cubic_s_max;
   }
   return new_rate_;
 }
+#endif
